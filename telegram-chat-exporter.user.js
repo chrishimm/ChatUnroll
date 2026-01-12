@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Telegram Chat Exporter
 // @namespace    https://github.com/user/ChatUnroll
-// @version      1.1.0
+// @version      1.2.0
 // @description  Export Telegram Web chat to PDF with images for LLM consumption
 // @author       ChatUnroll
 // @match        https://web.telegram.org/*
@@ -556,18 +556,78 @@
             return separatorEl ? separatorEl.textContent.trim() : '';
         },
 
+        // Find the nearest date separator before this message element
+        // This searches backwards through siblings, not just the immediate previous sibling
+        findNearestDateSeparator(messageEl) {
+            let currentEl = messageEl.previousElementSibling;
+            let maxSteps = 50; // Limit search to prevent infinite loops
+
+            while (currentEl && maxSteps > 0) {
+                if (currentEl.classList.contains('is-date') ||
+                    currentEl.classList.contains('service-msg') ||
+                    currentEl.classList.contains('date-group') ||
+                    currentEl.classList.contains('bubble') && currentEl.querySelector('.service-msg')) {
+                    return currentEl;
+                }
+                currentEl = currentEl.previousElementSibling;
+                maxSteps--;
+            }
+            return null;
+        },
+
+        // Extract date from message's internal data attributes (more reliable than DOM text)
+        getDateFromMessageElement(messageEl) {
+            // Try to get timestamp from data attributes
+            const timestamp = messageEl.dataset.timestamp || messageEl.dataset.date;
+            if (timestamp) {
+                const date = new Date(parseInt(timestamp) * 1000);
+                if (!isNaN(date.getTime())) {
+                    return this.normalizeToLocalStartOfDay(date);
+                }
+            }
+
+            // Try to extract from time element's title or datetime attribute
+            const timeEl = messageEl.querySelector('.time, .time-inner, .message-time');
+            if (timeEl) {
+                const title = timeEl.getAttribute('title');
+                const datetime = timeEl.getAttribute('datetime');
+                if (title) {
+                    const parsed = new Date(title);
+                    if (!isNaN(parsed.getTime())) {
+                        return this.normalizeToLocalStartOfDay(parsed);
+                    }
+                }
+                if (datetime) {
+                    const parsed = new Date(datetime);
+                    if (!isNaN(parsed.getTime())) {
+                        return this.normalizeToLocalStartOfDay(parsed);
+                    }
+                }
+            }
+
+            return null;
+        },
+
         // Helper to normalize date to start-of-day in local timezone
         normalizeToLocalStartOfDay(date) {
             if (!date || isNaN(date.getTime())) return null;
             return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
         },
 
-        parseDateText(dateText) {
+        parseDateText(dateText, referenceDate = null) {
             // Try to parse various date formats from Telegram
             // Format: "January 10", "10 January 2024", "Today", "Yesterday", etc.
             // IMPORTANT: All returned dates are normalized to start-of-day in LOCAL timezone
-            const today = new Date();
-            const lowerText = dateText.toLowerCase().trim();
+            //
+            // referenceDate: Optional date to use as reference for year inference
+            //                (useful when processing messages in chronological order)
+            const today = referenceDate || new Date();
+            const lowerText = (dateText || '').toLowerCase().trim();
+
+            if (!lowerText) {
+                console.log('[TCE] parseDateText: empty date text');
+                return null;
+            }
 
             if (lowerText === 'today') {
                 return this.normalizeToLocalStartOfDay(today);
@@ -578,12 +638,22 @@
                 return this.normalizeToLocalStartOfDay(yesterday);
             }
 
+            // Check for relative date patterns (e.g., "2 days ago", "last week")
+            const daysAgoMatch = lowerText.match(/(\d+)\s*days?\s*ago/i);
+            if (daysAgoMatch) {
+                const daysAgo = parseInt(daysAgoMatch[1]);
+                const date = new Date(today);
+                date.setDate(date.getDate() - daysAgo);
+                return this.normalizeToLocalStartOfDay(date);
+            }
+
             // Try parsing as full date string (e.g., "10 January 2024" or "January 10, 2024")
             let parsed = new Date(dateText);
             if (!isNaN(parsed.getTime())) {
                 // Check if the parsed date is reasonable (has correct year info)
                 // If year is 2001 (JavaScript default for "January 10"), it means no year was provided
                 if (parsed.getFullYear() !== 2001) {
+                    console.log(`[TCE] parseDateText: full date parsed - ${dateText} -> ${parsed.toDateString()}`);
                     return this.normalizeToLocalStartOfDay(parsed);
                 }
             }
@@ -591,27 +661,58 @@
             // Try adding current year first
             let withYear = new Date(`${dateText} ${today.getFullYear()}`);
             if (!isNaN(withYear.getTime())) {
-                // If the resulting date is in the future (more than 1 day ahead),
-                // it's likely from the previous year
                 const normalized = this.normalizeToLocalStartOfDay(withYear);
                 const todayNormalized = this.normalizeToLocalStartOfDay(today);
                 const oneDayInMs = 24 * 60 * 60 * 1000;
 
+                // If the resulting date is in the future (more than 1 day ahead),
+                // it's likely from the previous year
                 if (normalized.getTime() > todayNormalized.getTime() + oneDayInMs) {
                     // Try previous year
                     withYear = new Date(`${dateText} ${today.getFullYear() - 1}`);
                     if (!isNaN(withYear.getTime())) {
+                        console.log(`[TCE] parseDateText: date in future, using previous year - ${dateText} -> ${withYear.toDateString()}`);
                         return this.normalizeToLocalStartOfDay(withYear);
                     }
                 }
+
+                console.log(`[TCE] parseDateText: added current year - ${dateText} -> ${normalized.toDateString()}`);
                 return normalized;
+            }
+
+            // Try different date format patterns manually
+            // Pattern: "3 January" or "January 3" without year
+            const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
+                               'july', 'august', 'september', 'october', 'november', 'december'];
+            for (let i = 0; i < monthNames.length; i++) {
+                const monthName = monthNames[i];
+                // Match "3 January" or "January 3"
+                const dayFirstMatch = lowerText.match(new RegExp(`(\\d{1,2})\\s+${monthName}`));
+                const monthFirstMatch = lowerText.match(new RegExp(`${monthName}\\s+(\\d{1,2})`));
+                const day = dayFirstMatch ? parseInt(dayFirstMatch[1]) : (monthFirstMatch ? parseInt(monthFirstMatch[1]) : null);
+
+                if (day && day >= 1 && day <= 31) {
+                    // Try with current year first
+                    let date = new Date(today.getFullYear(), i, day);
+                    const todayNormalized = this.normalizeToLocalStartOfDay(today);
+
+                    // If date is in the future, use previous year
+                    if (date.getTime() > todayNormalized.getTime() + 24 * 60 * 60 * 1000) {
+                        date = new Date(today.getFullYear() - 1, i, day);
+                    }
+
+                    console.log(`[TCE] parseDateText: manual parse - ${dateText} -> ${date.toDateString()}`);
+                    return this.normalizeToLocalStartOfDay(date);
+                }
             }
 
             // Fallback: Try to parse the original date string and normalize
             if (!isNaN(parsed.getTime())) {
+                console.log(`[TCE] parseDateText: fallback parse - ${dateText} -> ${parsed.toDateString()}`);
                 return this.normalizeToLocalStartOfDay(parsed);
             }
 
+            console.log(`[TCE] parseDateText: failed to parse - ${dateText}`);
             return null;
         },
 
@@ -1131,33 +1232,82 @@
                 const msgId = msgEl.dataset.mid || msgEl.dataset.messageId || msgEl.textContent.slice(0, 50);
                 if (collectedIds.has(msgId)) continue;
 
-                // Check for date separator before this message
-                const dateSeparator = msgEl.previousElementSibling;
-                if (dateSeparator && (
-                    dateSeparator.classList.contains('is-date') ||
-                    dateSeparator.classList.contains('service-msg')
+                // IMPROVED: Find date for this message using multiple methods
+                let msgDate = null;
+                let dateSource = 'none';
+
+                // Method 1: Check immediate previous sibling for date separator (fastest)
+                const immediateSeparator = msgEl.previousElementSibling;
+                if (immediateSeparator && (
+                    immediateSeparator.classList.contains('is-date') ||
+                    immediateSeparator.classList.contains('service-msg') ||
+                    immediateSeparator.classList.contains('date-group')
                 )) {
-                    currentDate = TelegramParser.getDateFromSeparator(dateSeparator);
-                    const msgDate = TelegramParser.parseDateText(currentDate);
+                    currentDate = TelegramParser.getDateFromSeparator(immediateSeparator);
+                    msgDate = TelegramParser.parseDateText(currentDate);
+                    dateSource = 'immediate-separator';
+                }
 
-                    if (msgDate) {
-                        // Parse date strings as LOCAL timezone (not UTC)
-                        const fromDate = TelegramParser.parseLocalDate(state.dateRange.from, false);
-                        const toDate = TelegramParser.parseLocalDate(state.dateRange.to, true);
-
-                        if (msgDate < fromDate) {
-                            inDateRange = false;
-                            continue;
-                        } else if (msgDate > toDate) {
-                            passedDateRange = true;
-                            break;
-                        } else {
-                            inDateRange = true;
+                // Method 2: If no immediate separator, search for nearest date separator
+                if (!msgDate) {
+                    const nearestSeparator = TelegramParser.findNearestDateSeparator(msgEl);
+                    if (nearestSeparator) {
+                        const separatorText = TelegramParser.getDateFromSeparator(nearestSeparator);
+                        msgDate = TelegramParser.parseDateText(separatorText);
+                        if (msgDate) {
+                            currentDate = separatorText;
+                            dateSource = 'nearest-separator';
                         }
                     }
                 }
 
-                // If we haven't found the start date yet, skip
+                // Method 3: Try to extract date from message element's data attributes
+                if (!msgDate) {
+                    msgDate = TelegramParser.getDateFromMessageElement(msgEl);
+                    if (msgDate) {
+                        // Format the date for display
+                        currentDate = msgDate.toLocaleDateString('en-US', {
+                            month: 'long',
+                            day: 'numeric',
+                            year: 'numeric'
+                        });
+                        dateSource = 'message-data';
+                    }
+                }
+
+                // Method 4: If still no date and we have a previous known date, use that
+                // This handles messages that are on the same day as previous messages
+                if (!msgDate && currentDate) {
+                    msgDate = TelegramParser.parseDateText(currentDate);
+                    dateSource = 'inherited';
+                }
+
+                // Now check if the message is within the date range
+                if (msgDate) {
+                    // Parse date strings as LOCAL timezone (not UTC)
+                    const fromDate = TelegramParser.parseLocalDate(state.dateRange.from, false);
+                    const toDate = TelegramParser.parseLocalDate(state.dateRange.to, true);
+
+                    if (msgDate < fromDate) {
+                        inDateRange = false;
+                        console.log(`[TCE] Message outside range (before): ${currentDate} < ${state.dateRange.from} [${dateSource}]`);
+                        continue;
+                    } else if (msgDate > toDate) {
+                        console.log(`[TCE] Message outside range (after): ${currentDate} > ${state.dateRange.to} [${dateSource}]`);
+                        passedDateRange = true;
+                        break;
+                    } else {
+                        inDateRange = true;
+                    }
+                }
+
+                // If we haven't established a date yet, include message but log warning
+                if (!msgDate && !currentDate) {
+                    console.log('[TCE] Warning: No date found for message, including it anyway');
+                    inDateRange = true; // Include messages when date is unknown
+                }
+
+                // If we have a date but message is not in range, skip
                 if (!inDateRange && currentDate) continue;
 
                 // Parse the message
