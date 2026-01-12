@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Telegram Chat Exporter
 // @namespace    https://github.com/user/ChatUnroll
-// @version      1.2.0
+// @version      1.3.0
 // @description  Export Telegram Web chat to PDF with images for LLM consumption
 // @author       ChatUnroll
 // @match        https://web.telegram.org/*
@@ -27,6 +27,9 @@
         scrollDelay: 300,           // ms between scroll steps
         imageLoadDelay: 500,        // ms to wait for image to load
         screenshotDelay: 200,       // ms before taking screenshot
+        imageQualityFull: 1.0,      // JPEG quality for full resolution mode (0-1)
+        imageQualityThumb: 0.8,     // JPEG quality for thumbnail mode (0-1)
+        canvasScale: 2,             // Scale factor for html2canvas (higher = better quality)
     };
 
     // ============================================
@@ -39,6 +42,7 @@
         currentFileIndex: 1,
         chatName: '',
         dateRange: { from: null, to: null },
+        imageQuality: 'full', // 'full' or 'thumbnail'
     };
 
     // ============================================
@@ -307,10 +311,16 @@
         weekAgoDate.setDate(weekAgoDate.getDate() - 7);
         const weekAgo = `${weekAgoDate.getFullYear()}-${String(weekAgoDate.getMonth() + 1).padStart(2, '0')}-${String(weekAgoDate.getDate()).padStart(2, '0')}`;
 
+        // Get default chat name from DOM
+        const defaultChatName = TelegramParser.getChatName();
+
         overlay.innerHTML = `
             <div id="tce-modal">
                 <h2>Export Chat</h2>
                 <p class="subtitle">Export messages with images to PDF for LLM analysis</p>
+
+                <label for="tce-chat-name">Chat Name</label>
+                <input type="text" id="tce-chat-name" value="${defaultChatName}" placeholder="Enter chat name" style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; margin-bottom: 20px; box-sizing: border-box; background-color: #ffffff; color: #333333;">
 
                 <label for="tce-date-from">From Date</label>
                 <input type="date" id="tce-date-from" value="${weekAgo}">
@@ -322,6 +332,12 @@
                 <select id="tce-format" style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; margin-bottom: 20px; box-sizing: border-box; background-color: #ffffff; color: #333333;">
                     <option value="html">HTML (recommended - preserves images)</option>
                     <option value="pdf">PDF (may have image issues)</option>
+                </select>
+
+                <label for="tce-image-quality">Image Quality</label>
+                <select id="tce-image-quality" style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; margin-bottom: 20px; box-sizing: border-box; background-color: #ffffff; color: #333333;">
+                    <option value="full">Full Resolution (slower, larger file)</option>
+                    <option value="thumbnail">Thumbnail (faster, smaller file)</option>
                 </select>
 
                 <div id="tce-progress">
@@ -438,8 +454,36 @@
         },
 
         getChatName() {
-            const titleEl = document.querySelector('.chat-info .title, .peer-title, .top .title, .chat-title');
-            return titleEl ? titleEl.textContent.trim() : 'Telegram Chat';
+            // Try multiple selectors to find the chat name
+            // Priority: specific chat info > header title > peer title
+            const selectors = [
+                '.chat-info .info .title',           // Chat info panel
+                '.chat-info .content .title',        // Alternative chat info
+                '.top .chat-info .title',            // Top bar chat info
+                '.column-center .chat-info .title',  // Center column
+                '.sidebar .chat .title.active',      // Active chat in sidebar
+                '.peer-title',                       // Peer title (common)
+                '.top .title',                       // Top bar title
+                '.chat-title',                       // Generic chat title
+                '.TopBar .title',                    // React version
+                '[class*="ChatTitle"]',              // Any class containing ChatTitle
+            ];
+
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el && el.textContent.trim()) {
+                    const name = el.textContent.trim();
+                    // Avoid picking up navigation or UI elements
+                    if (name.length > 0 && name.length < 100 &&
+                        !name.toLowerCase().includes('telegram') &&
+                        !name.toLowerCase().includes('search')) {
+                        console.log(`[TCE] Found chat name using selector: ${selector} -> "${name}"`);
+                        return name;
+                    }
+                }
+            }
+
+            return 'Telegram Chat';
         },
 
         getScrollContainer() {
@@ -943,13 +987,16 @@
 
     async function captureElement(element) {
         try {
+            const quality = state.imageQuality === 'full' ? CONFIG.imageQualityFull : CONFIG.imageQualityThumb;
+            const scale = state.imageQuality === 'full' ? CONFIG.canvasScale : 1;
+
             const canvas = await html2canvas(element, {
                 useCORS: true,
                 allowTaint: true,
                 backgroundColor: null,
-                scale: 1,
+                scale: scale,
             });
-            return canvas.toDataURL('image/jpeg', 0.8);
+            return canvas.toDataURL('image/jpeg', quality);
         } catch (error) {
             console.error('Screenshot failed:', error);
             return null;
@@ -960,7 +1007,8 @@
         if (!imgElement || !imgElement.src) return null;
 
         const src = imgElement.src;
-        console.log('[TCE] Attempting to capture image from src:', src);
+        const quality = state.imageQuality === 'full' ? CONFIG.imageQualityFull : CONFIG.imageQualityThumb;
+        console.log(`[TCE] Attempting to capture image from src (quality: ${quality}):`, src);
 
         // Method 1: Try direct canvas drawing (works if same-origin or CORS allowed)
         try {
@@ -982,14 +1030,14 @@
             ctx.drawImage(imgElement, 0, 0);
 
             // This will throw if tainted by cross-origin data
-            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-            console.log('[TCE] Direct canvas capture succeeded');
+            const dataUrl = canvas.toDataURL('image/jpeg', quality);
+            console.log(`[TCE] Direct canvas capture succeeded (${canvas.width}x${canvas.height})`);
             return dataUrl;
         } catch (e) {
             console.log('[TCE] Direct canvas failed (CORS):', e.message);
         }
 
-        // Method 2: Try fetching the image as blob
+        // Method 2: Try fetching the image as blob (preserves original quality)
         try {
             const response = await fetch(src, {
                 mode: 'cors',
@@ -1027,15 +1075,15 @@
                 canvas.width = img.naturalWidth;
                 canvas.height = img.naturalHeight;
                 ctx.drawImage(img, 0, 0);
-                const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-                console.log('[TCE] CrossOrigin image capture succeeded');
+                const dataUrl = canvas.toDataURL('image/jpeg', quality);
+                console.log(`[TCE] CrossOrigin image capture succeeded (${canvas.width}x${canvas.height})`);
                 return dataUrl;
             }
         } catch (e) {
             console.log('[TCE] CrossOrigin method failed:', e.message);
         }
 
-        // Method 4: For blob URLs, try direct fetch
+        // Method 4: For blob URLs, try direct fetch (preserves original quality)
         if (src.startsWith('blob:')) {
             try {
                 const response = await fetch(src);
@@ -1057,9 +1105,10 @@
 
     async function captureImageFromUrl(url) {
         if (!url) return null;
-        console.log('[TCE] Attempting to capture image from URL:', url);
+        const quality = state.imageQuality === 'full' ? CONFIG.imageQualityFull : CONFIG.imageQualityThumb;
+        console.log(`[TCE] Attempting to capture image from URL (quality: ${quality}):`, url);
 
-        // Method 1: Try fetching as blob with credentials
+        // Method 1: Try fetching as blob with credentials (preserves original quality)
         try {
             const response = await fetch(url, {
                 mode: 'cors',
@@ -1096,7 +1145,8 @@
                 canvas.width = img.naturalWidth;
                 canvas.height = img.naturalHeight;
                 ctx.drawImage(img, 0, 0);
-                return canvas.toDataURL('image/jpeg', 0.8);
+                console.log(`[TCE] URL image capture succeeded (${canvas.width}x${canvas.height})`);
+                return canvas.toDataURL('image/jpeg', quality);
             }
         } catch (e) {
             console.log('[TCE] Image from URL canvas failed:', e.message);
@@ -1133,6 +1183,8 @@
 
         const fromDate = document.getElementById('tce-date-from').value;
         const toDate = document.getElementById('tce-date-to').value;
+        const customChatName = document.getElementById('tce-chat-name').value.trim();
+        const imageQuality = document.getElementById('tce-image-quality').value;
 
         if (!fromDate || !toDate) {
             showToast('Please select both dates', 'error');
@@ -1149,7 +1201,8 @@
         state.currentImages = 0;
         state.currentFileIndex = 1;
         state.dateRange = { from: fromDate, to: toDate };
-        state.chatName = TelegramParser.getChatName();
+        state.chatName = customChatName || TelegramParser.getChatName();
+        state.imageQuality = imageQuality; // 'full' or 'thumbnail'
 
         // Update UI
         document.getElementById('tce-floating-btn').classList.add('exporting');
@@ -1323,66 +1376,115 @@
                         await saveBatchToPDF();
                     }
 
+                    const qualityMode = state.imageQuality || 'full';
                     updateProgress(
                         30 + (state.messages.length % 100) * 0.5,
-                        `Capturing image ${state.currentImages + 1}...`,
+                        `Capturing image ${state.currentImages + 1} (${qualityMode} quality)...`,
                         { messages: state.messages.length, images: state.currentImages, files: state.currentFileIndex }
                     );
 
                     // Store the thumbnail for fallback
                     const thumbnailImg = parsed.imageElement;
 
-                    // *** MOST ROBUST METHOD: Use Telegram's internal API ***
-                    // This bypasses CORS issues by using Telegram's own download manager
-                    if (!parsed.imageData && hasTelegramAPI()) {
-                        console.log('[TCE] Trying Telegram internal API (most robust)');
-                        parsed.imageData = await captureMediaViaTelegramAPI(msgEl);
-                    }
-
-                    // Try Method 0: If there's a canvas element, capture it directly
-                    if (!parsed.imageData && parsed.canvasElement) {
-                        console.log('[TCE] Trying to capture from canvas');
-                        try {
-                            parsed.imageData = parsed.canvasElement.toDataURL('image/jpeg', 0.8);
-                        } catch (e) {
-                            console.log('[TCE] Canvas capture failed:', e.message);
+                    // *** FULL RESOLUTION MODE ***
+                    // Prioritize methods that get full resolution images
+                    if (qualityMode === 'full') {
+                        // Method 1: Use Telegram's internal API (usually full resolution)
+                        if (!parsed.imageData && hasTelegramAPI()) {
+                            console.log('[TCE] [FULL] Trying Telegram internal API');
+                            parsed.imageData = await captureMediaViaTelegramAPI(msgEl);
                         }
-                    }
 
-                    // Try Method 0b: If there's a background image URL, try to fetch it
-                    if (!parsed.imageData && parsed.backgroundImageUrl) {
-                        console.log('[TCE] Trying to capture from background image URL:', parsed.backgroundImageUrl);
-                        parsed.imageData = await captureImageFromUrl(parsed.backgroundImageUrl);
-                    }
+                        // Method 2: Open full image viewer and capture (guaranteed full resolution)
+                        if (!parsed.imageData && parsed.mediaWrapper) {
+                            console.log('[TCE] [FULL] Opening full image viewer for high-res capture');
+                            const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
+                            if (fullImg) {
+                                // Wait extra time for high-res image to load
+                                await sleep(CONFIG.imageLoadDelay);
 
-                    // Try Method 1: Capture directly from thumbnail/preview (avoids opening viewer)
-                    if (!parsed.imageData && thumbnailImg) {
-                        console.log('[TCE] Trying to capture from thumbnail directly');
-                        parsed.imageData = await captureImageFromSrc(thumbnailImg);
-                    }
+                                // Save the full image URL
+                                if (fullImg.src && !parsed.imageUrl) {
+                                    parsed.imageUrl = fullImg.src;
+                                }
 
-                    // Try Method 2: Open full image viewer and capture
-                    if (!parsed.imageData && parsed.mediaWrapper) {
-                        console.log('[TCE] Opening full image viewer');
-                        const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
-                        if (fullImg) {
-                            // Save the full image URL for fallback
-                            if (fullImg.src && !parsed.imageUrl) {
-                                parsed.imageUrl = fullImg.src;
+                                // Capture with high quality
+                                parsed.imageData = await captureImageFromSrc(fullImg);
+
+                                // If direct capture failed, try with fallback
+                                if (!parsed.imageData) {
+                                    parsed.imageData = await captureImageWithFallback(fullImg, thumbnailImg);
+                                }
+
+                                TelegramParser.closeImageViewer();
+                                await sleep(200);
                             }
-                            parsed.imageData = await captureImageWithFallback(fullImg, thumbnailImg);
-                            TelegramParser.closeImageViewer();
-                            await sleep(200);
+                        }
+
+                        // Method 3: Try background image URL (might be full res)
+                        if (!parsed.imageData && parsed.backgroundImageUrl) {
+                            console.log('[TCE] [FULL] Trying background image URL:', parsed.backgroundImageUrl);
+                            parsed.imageData = await captureImageFromUrl(parsed.backgroundImageUrl);
+                        }
+
+                        // Method 4: Fallback to thumbnail if no full res available
+                        if (!parsed.imageData && thumbnailImg) {
+                            console.log('[TCE] [FULL] Falling back to thumbnail');
+                            parsed.imageData = await captureImageFromSrc(thumbnailImg);
+                        }
+                    }
+                    // *** THUMBNAIL MODE ***
+                    // Prioritize speed over quality
+                    else {
+                        // Method 1: Use Telegram's internal API
+                        if (!parsed.imageData && hasTelegramAPI()) {
+                            console.log('[TCE] [THUMB] Trying Telegram internal API');
+                            parsed.imageData = await captureMediaViaTelegramAPI(msgEl);
+                        }
+
+                        // Method 2: Capture from canvas (thumbnail)
+                        if (!parsed.imageData && parsed.canvasElement) {
+                            console.log('[TCE] [THUMB] Capturing from canvas');
+                            try {
+                                parsed.imageData = parsed.canvasElement.toDataURL('image/jpeg', 0.8);
+                            } catch (e) {
+                                console.log('[TCE] Canvas capture failed:', e.message);
+                            }
+                        }
+
+                        // Method 3: Capture from thumbnail directly
+                        if (!parsed.imageData && thumbnailImg) {
+                            console.log('[TCE] [THUMB] Capturing from thumbnail');
+                            parsed.imageData = await captureImageFromSrc(thumbnailImg);
+                        }
+
+                        // Method 4: Try background image URL
+                        if (!parsed.imageData && parsed.backgroundImageUrl) {
+                            console.log('[TCE] [THUMB] Trying background image URL');
+                            parsed.imageData = await captureImageFromUrl(parsed.backgroundImageUrl);
+                        }
+
+                        // Method 5: Open full image viewer only as last resort
+                        if (!parsed.imageData && parsed.mediaWrapper) {
+                            console.log('[TCE] [THUMB] Opening full image viewer as fallback');
+                            const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
+                            if (fullImg) {
+                                if (fullImg.src && !parsed.imageUrl) {
+                                    parsed.imageUrl = fullImg.src;
+                                }
+                                parsed.imageData = await captureImageWithFallback(fullImg, thumbnailImg);
+                                TelegramParser.closeImageViewer();
+                                await sleep(200);
+                            }
                         }
                     }
 
-                    // Try Method 3: If still no data, try html2canvas on the thumbnail
+                    // *** LAST RESORT FALLBACKS (for both modes) ***
                     if (!parsed.imageData && thumbnailImg) {
                         console.log('[TCE] Last resort: html2canvas on thumbnail');
                         parsed.imageData = await captureElement(thumbnailImg);
                     }
 
-                    // Try Method 4: html2canvas on the media wrapper
                     if (!parsed.imageData && parsed.mediaWrapper) {
                         console.log('[TCE] Last resort: html2canvas on media wrapper');
                         parsed.imageData = await captureElement(parsed.mediaWrapper);
