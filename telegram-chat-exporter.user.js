@@ -313,6 +313,12 @@
                 <label for="tce-date-to">To Date</label>
                 <input type="date" id="tce-date-to" value="${today}">
 
+                <label for="tce-format">Export Format</label>
+                <select id="tce-format" style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; margin-bottom: 20px; box-sizing: border-box; background-color: #ffffff; color: #333333;">
+                    <option value="html">HTML (recommended - preserves images)</option>
+                    <option value="pdf">PDF (may have image issues)</option>
+                </select>
+
                 <div id="tce-progress">
                     <div id="tce-progress-text">Preparing export...</div>
                     <div id="tce-progress-bar-container">
@@ -401,29 +407,29 @@
     // ============================================
 
     const TelegramParser = {
-        // Selectors for Telegram Web K (newer version)
+        // Selectors for Telegram Web K (newer version) - Updated Jan 2026
         selectors: {
             // Message container
-            messagesContainer: '.bubbles-inner, .messages-container, #column-center .scrollable-content',
+            messagesContainer: '.bubbles-inner, .messages-container, #column-center .scrollable-content, .chatlist',
             // Individual message
-            message: '.bubble:not(.is-date), .message',
+            message: '.bubble:not(.is-date):not(.is-service), .message:not(.service), .Message',
             // Message text content
-            messageText: '.message, .text-content, .message-content',
+            messageText: '.message, .text-content, .message-content, .text, .translatable-message',
             // Sender name
-            senderName: '.name, .peer-title, .title',
+            senderName: '.name, .peer-title, .title, .message-title, .sender-title',
             // Timestamp
-            timestamp: '.time, .time-inner, .message-time',
+            timestamp: '.time, .time-inner, .message-time, .MessageMeta time, .meta time',
             // Date separator
-            dateSeparator: '.bubble.is-date, .service-msg, .date-group',
-            // Media (images)
-            mediaImage: '.attachment img, .media-photo img, img.media-photo, .media-container img',
+            dateSeparator: '.bubble.is-date, .service-msg, .date-group, .bubble.is-service',
+            // Media (images) - more comprehensive selectors
+            mediaImage: '.attachment img, .media-photo img, img.media-photo, .media-container img, .media-inner img, canvas.thumbnail, .photo img, .media-photo-container img, img[src*="telegram"]',
             // Media wrapper that can be clicked
-            mediaWrapper: '.attachment, .media-photo, .media-container, .media-inner',
+            mediaWrapper: '.attachment, .media-photo, .media-container, .media-inner, .photo, .media-photo-container',
             // Full image viewer
-            imageViewer: '.media-viewer-movers, .media-viewer-whole, #media-viewer',
-            imageViewerImg: '.media-viewer-movers img, .media-viewer-whole img, #media-viewer img',
+            imageViewer: '.media-viewer-movers, .media-viewer-whole, #media-viewer, .MediaViewer, .media-viewer',
+            imageViewerImg: '.media-viewer-movers img, .media-viewer-whole img, #media-viewer img, .MediaViewer img, .media-viewer img, .media-viewer-aspecter img',
             // Scrollable container
-            scrollContainer: '.bubbles, .scrollable, #column-center .scrollable',
+            scrollContainer: '.bubbles, .scrollable, #column-center .scrollable, .Transition__slide--active .scrollable',
         },
 
         getChatName() {
@@ -473,10 +479,18 @@
                 result.sender = result.sender || 'Me';
             }
 
-            // Get timestamp
+            // Get timestamp - extract only the time portion
             const timeEl = messageEl.querySelector(this.selectors.timestamp);
             if (timeEl) {
-                result.time = timeEl.textContent.trim();
+                let timeText = timeEl.textContent.trim();
+                // Extract time pattern (HH:MM or H:MM) from potentially messy text
+                const timeMatch = timeText.match(/(\d{1,2}:\d{2})/);
+                if (timeMatch) {
+                    result.time = timeMatch[1];
+                } else {
+                    // Clean up the text - remove non-printable chars and extra content
+                    result.time = timeText.replace(/[^\d:APMapm\s]/g, '').trim().slice(0, 10);
+                }
             }
 
             // Get text content
@@ -485,12 +499,49 @@
                 result.content = textEl.textContent.trim();
             }
 
-            // Check for image
-            const imgEl = messageEl.querySelector(this.selectors.mediaImage);
+            // Check for image - including background images
+            let imgEl = messageEl.querySelector(this.selectors.mediaImage);
+            const mediaWrapper = messageEl.querySelector(this.selectors.mediaWrapper);
+
+            // If no img tag found, check for background-image in media wrapper
+            if (!imgEl && mediaWrapper) {
+                const bgStyle = window.getComputedStyle(mediaWrapper).backgroundImage;
+                if (bgStyle && bgStyle !== 'none') {
+                    // Extract URL from background-image
+                    const urlMatch = bgStyle.match(/url\(["']?([^"')]+)["']?\)/);
+                    if (urlMatch) {
+                        result.type = 'image';
+                        result.backgroundImageUrl = urlMatch[1];
+                        result.mediaWrapper = mediaWrapper;
+                    }
+                }
+
+                // Also check child elements for background images
+                const childWithBg = mediaWrapper.querySelector('[style*="background-image"]');
+                if (childWithBg) {
+                    const childBgStyle = childWithBg.style.backgroundImage;
+                    const urlMatch = childBgStyle.match(/url\(["']?([^"')]+)["']?\)/);
+                    if (urlMatch) {
+                        result.type = 'image';
+                        result.backgroundImageUrl = urlMatch[1];
+                        result.mediaWrapper = mediaWrapper;
+                    }
+                }
+
+                // Check for canvas (Telegram sometimes uses canvas for thumbnails)
+                const canvas = mediaWrapper.querySelector('canvas');
+                if (canvas) {
+                    result.type = 'image';
+                    result.canvasElement = canvas;
+                    result.mediaWrapper = mediaWrapper;
+                }
+            }
+
             if (imgEl) {
                 result.type = 'image';
                 result.imageElement = imgEl;
-                result.mediaWrapper = messageEl.querySelector(this.selectors.mediaWrapper);
+                result.imageUrl = imgEl.src || imgEl.dataset.src || '';
+                result.mediaWrapper = mediaWrapper || messageEl.querySelector(this.selectors.mediaWrapper);
             }
 
             return result;
@@ -613,6 +664,174 @@
         }
     }
 
+    async function captureImageFromSrc(imgElement) {
+        if (!imgElement || !imgElement.src) return null;
+
+        const src = imgElement.src;
+        console.log('[TCE] Attempting to capture image from src:', src);
+
+        // Method 1: Try direct canvas drawing (works if same-origin or CORS allowed)
+        try {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+
+            // Wait for image to be fully loaded
+            if (!imgElement.complete) {
+                await new Promise((resolve, reject) => {
+                    imgElement.onload = resolve;
+                    imgElement.onerror = reject;
+                    setTimeout(resolve, 3000);
+                });
+            }
+
+            canvas.width = imgElement.naturalWidth || imgElement.width;
+            canvas.height = imgElement.naturalHeight || imgElement.height;
+
+            ctx.drawImage(imgElement, 0, 0);
+
+            // This will throw if tainted by cross-origin data
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+            console.log('[TCE] Direct canvas capture succeeded');
+            return dataUrl;
+        } catch (e) {
+            console.log('[TCE] Direct canvas failed (CORS):', e.message);
+        }
+
+        // Method 2: Try fetching the image as blob
+        try {
+            const response = await fetch(src, {
+                mode: 'cors',
+                credentials: 'include'
+            });
+
+            if (response.ok) {
+                const blob = await response.blob();
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                });
+            }
+        } catch (e) {
+            console.log('[TCE] Fetch with CORS failed:', e.message);
+        }
+
+        // Method 3: Try using a fresh image with crossOrigin attribute
+        try {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+
+            const loaded = await new Promise((resolve) => {
+                img.onload = () => resolve(true);
+                img.onerror = () => resolve(false);
+                setTimeout(() => resolve(false), 5000);
+                img.src = src;
+            });
+
+            if (loaded) {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                ctx.drawImage(img, 0, 0);
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                console.log('[TCE] CrossOrigin image capture succeeded');
+                return dataUrl;
+            }
+        } catch (e) {
+            console.log('[TCE] CrossOrigin method failed:', e.message);
+        }
+
+        // Method 4: For blob URLs, try direct fetch
+        if (src.startsWith('blob:')) {
+            try {
+                const response = await fetch(src);
+                const blob = await response.blob();
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                });
+            } catch (e) {
+                console.log('[TCE] Blob fetch failed:', e.message);
+            }
+        }
+
+        console.log('[TCE] All image capture methods failed');
+        return null;
+    }
+
+    async function captureImageFromUrl(url) {
+        if (!url) return null;
+        console.log('[TCE] Attempting to capture image from URL:', url);
+
+        // Method 1: Try fetching as blob with credentials
+        try {
+            const response = await fetch(url, {
+                mode: 'cors',
+                credentials: 'include'
+            });
+            if (response.ok) {
+                const blob = await response.blob();
+                return new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => resolve(reader.result);
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                });
+            }
+        } catch (e) {
+            console.log('[TCE] Fetch URL failed:', e.message);
+        }
+
+        // Method 2: Create image element and try to draw to canvas
+        try {
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+
+            const loaded = await new Promise((resolve) => {
+                img.onload = () => resolve(true);
+                img.onerror = () => resolve(false);
+                setTimeout(() => resolve(false), 5000);
+                img.src = url;
+            });
+
+            if (loaded && img.naturalWidth > 0) {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                ctx.drawImage(img, 0, 0);
+                return canvas.toDataURL('image/jpeg', 0.8);
+            }
+        } catch (e) {
+            console.log('[TCE] Image from URL canvas failed:', e.message);
+        }
+
+        return null;
+    }
+
+    async function captureImageWithFallback(imgElement, thumbnailElement) {
+        // Try to capture the main image first
+        let imageData = await captureImageFromSrc(imgElement);
+
+        // If failed, try the thumbnail as fallback
+        if (!imageData && thumbnailElement && thumbnailElement !== imgElement) {
+            console.log('[TCE] Trying thumbnail as fallback');
+            imageData = await captureImageFromSrc(thumbnailElement);
+        }
+
+        // Last resort: try html2canvas on the element
+        if (!imageData && imgElement) {
+            console.log('[TCE] Trying html2canvas as last resort');
+            imageData = await captureElement(imgElement);
+        }
+
+        return imageData;
+    }
+
     // ============================================
     // EXPORT ENGINE
     // ============================================
@@ -645,13 +864,19 @@
         document.getElementById('tce-btn-export').disabled = true;
         document.getElementById('tce-progress').classList.add('visible');
 
+        const exportFormat = document.getElementById('tce-format').value;
+
         try {
             await collectMessages();
 
             if (state.messages.length === 0) {
                 showToast('No messages found in the selected date range', 'error');
             } else {
-                await generatePDFs();
+                if (exportFormat === 'html') {
+                    await generateHTML();
+                } else {
+                    await generatePDFs();
+                }
                 showToast(`Export complete! ${state.messages.length} messages exported.`, 'success');
             }
         } catch (error) {
@@ -750,7 +975,7 @@
                 collectedIds.add(msgId);
 
                 // If it has an image, capture it
-                if (parsed.type === 'image' && parsed.mediaWrapper) {
+                if (parsed.type === 'image' && (parsed.mediaWrapper || parsed.imageElement || parsed.backgroundImageUrl || parsed.canvasElement)) {
                     // Check image limit
                     if (state.currentImages >= CONFIG.maxImagesPerFile) {
                         // Save current batch and start new file
@@ -763,12 +988,56 @@
                         { messages: state.messages.length, images: state.currentImages, files: state.currentFileIndex }
                     );
 
-                    // Open full image and capture
-                    const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
-                    if (fullImg) {
-                        parsed.imageData = await captureElement(fullImg);
-                        TelegramParser.closeImageViewer();
-                        await sleep(200);
+                    // Store the thumbnail for fallback
+                    const thumbnailImg = parsed.imageElement;
+
+                    // Try Method 0: If there's a canvas element, capture it directly
+                    if (!parsed.imageData && parsed.canvasElement) {
+                        console.log('[TCE] Trying to capture from canvas');
+                        try {
+                            parsed.imageData = parsed.canvasElement.toDataURL('image/jpeg', 0.8);
+                        } catch (e) {
+                            console.log('[TCE] Canvas capture failed:', e.message);
+                        }
+                    }
+
+                    // Try Method 0b: If there's a background image URL, try to fetch it
+                    if (!parsed.imageData && parsed.backgroundImageUrl) {
+                        console.log('[TCE] Trying to capture from background image URL:', parsed.backgroundImageUrl);
+                        parsed.imageData = await captureImageFromUrl(parsed.backgroundImageUrl);
+                    }
+
+                    // Try Method 1: Capture directly from thumbnail/preview (avoids opening viewer)
+                    if (!parsed.imageData && thumbnailImg) {
+                        console.log('[TCE] Trying to capture from thumbnail directly');
+                        parsed.imageData = await captureImageFromSrc(thumbnailImg);
+                    }
+
+                    // Try Method 2: Open full image viewer and capture
+                    if (!parsed.imageData && parsed.mediaWrapper) {
+                        console.log('[TCE] Opening full image viewer');
+                        const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
+                        if (fullImg) {
+                            // Save the full image URL for fallback
+                            if (fullImg.src && !parsed.imageUrl) {
+                                parsed.imageUrl = fullImg.src;
+                            }
+                            parsed.imageData = await captureImageWithFallback(fullImg, thumbnailImg);
+                            TelegramParser.closeImageViewer();
+                            await sleep(200);
+                        }
+                    }
+
+                    // Try Method 3: If still no data, try html2canvas on the thumbnail
+                    if (!parsed.imageData && thumbnailImg) {
+                        console.log('[TCE] Last resort: html2canvas on thumbnail');
+                        parsed.imageData = await captureElement(thumbnailImg);
+                    }
+
+                    // Try Method 4: html2canvas on the media wrapper
+                    if (!parsed.imageData && parsed.mediaWrapper) {
+                        console.log('[TCE] Last resort: html2canvas on media wrapper');
+                        parsed.imageData = await captureElement(parsed.mediaWrapper);
                     }
 
                     state.currentImages++;
@@ -981,6 +1250,178 @@
         }
 
         updateProgress(100, 'Complete!');
+    }
+
+    async function generateHTML() {
+        updateProgress(80, 'Generating HTML file...');
+
+        let currentDate = '';
+        let messagesHtml = '';
+
+        for (const msg of state.messages) {
+            // Date separator
+            if (msg.date && msg.date !== currentDate) {
+                currentDate = msg.date;
+                messagesHtml += `
+                    <div class="date-separator">--- ${escapeHtml(currentDate)} ---</div>
+                `;
+            }
+
+            // Message
+            messagesHtml += `
+                <div class="message ${msg.sender === 'Me' ? 'outgoing' : 'incoming'}">
+                    <div class="message-header">
+                        <span class="timestamp">[${msg.time || '??:??'}]</span>
+                        <span class="sender">${escapeHtml(msg.sender) || 'Unknown'}:</span>
+                    </div>
+            `;
+
+            if (msg.content) {
+                messagesHtml += `<div class="message-text">${escapeHtml(msg.content)}</div>`;
+            }
+
+            // Handle image
+            if (msg.type === 'image') {
+                if (msg.imageData) {
+                    messagesHtml += `
+                        <div class="message-image">
+                            <img src="${msg.imageData}" alt="Image" style="max-width: 100%; max-height: 400px;">
+                        </div>
+                    `;
+                } else if (msg.imageUrl || msg.backgroundImageUrl) {
+                    const imgUrl = msg.imageUrl || msg.backgroundImageUrl;
+                    messagesHtml += `
+                        <div class="message-image">
+                            <a href="${escapeHtml(imgUrl)}" target="_blank">
+                                <img src="${escapeHtml(imgUrl)}" alt="Image" style="max-width: 100%; max-height: 400px;" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';">
+                                <span style="display:none; color: #999;">[Image - click to view: ${escapeHtml(imgUrl)}]</span>
+                            </a>
+                        </div>
+                    `;
+                } else {
+                    messagesHtml += `<div class="message-image failed">[Image - capture failed]</div>`;
+                }
+            }
+
+            messagesHtml += `</div>`;
+        }
+
+        const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${escapeHtml(state.chatName)} - Chat Export</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #333;
+        }
+        .header {
+            background: #fff;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .header h1 {
+            margin: 0 0 10px 0;
+            color: #0088cc;
+        }
+        .header .meta {
+            color: #666;
+            font-size: 14px;
+        }
+        .date-separator {
+            text-align: center;
+            color: #888;
+            font-size: 12px;
+            margin: 20px 0;
+            font-weight: bold;
+        }
+        .message {
+            background: #fff;
+            padding: 12px 16px;
+            margin: 8px 0;
+            border-radius: 12px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+        .message.outgoing {
+            background: #e3f2fd;
+            margin-left: 40px;
+        }
+        .message.incoming {
+            margin-right: 40px;
+        }
+        .message-header {
+            margin-bottom: 6px;
+        }
+        .timestamp {
+            color: #999;
+            font-size: 12px;
+        }
+        .sender {
+            font-weight: 600;
+            color: #0088cc;
+            margin-left: 8px;
+        }
+        .message-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.5;
+        }
+        .message-image {
+            margin-top: 10px;
+        }
+        .message-image img {
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        .message-image.failed {
+            color: #999;
+            font-style: italic;
+        }
+        @media print {
+            body { background: #fff; }
+            .message { box-shadow: none; border: 1px solid #eee; }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>${escapeHtml(state.chatName)}</h1>
+        <div class="meta">
+            <div>Exported: ${new Date().toLocaleString()}</div>
+            <div>Date Range: ${state.dateRange.from} to ${state.dateRange.to}</div>
+            <div>Part 1 of 1 | Messages: ${state.messages.length}</div>
+        </div>
+    </div>
+    <hr>
+    ${messagesHtml}
+</body>
+</html>`;
+
+        updateProgress(95, 'Preparing download...');
+
+        const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
+        const filename = `${sanitizeFilename(state.chatName)}_${state.dateRange.from}_to_${state.dateRange.to}.html`;
+        saveAs(blob, filename);
+
+        updateProgress(100, 'Complete!');
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        return text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
     }
 
     function sanitizeText(text) {
