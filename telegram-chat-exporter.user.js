@@ -152,6 +152,9 @@
             margin-bottom: 20px;
             box-sizing: border-box;
             transition: border-color 0.2s;
+            background-color: #ffffff;
+            color: #333333;
+            color-scheme: light;
         }
 
         #tce-modal input[type="date"]:focus {
