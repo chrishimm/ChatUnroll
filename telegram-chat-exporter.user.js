@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Telegram Chat Exporter
 // @namespace    https://github.com/user/ChatUnroll
-// @version      1.0.0
+// @version      1.1.0
 // @description  Export Telegram Web chat to PDF with images for LLM consumption
 // @author       ChatUnroll
 // @match        https://web.telegram.org/*
 // @grant        GM_addStyle
+// @grant        unsafeWindow
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js
@@ -649,6 +650,150 @@
         });
     }
 
+    // ============================================
+    // TELEGRAM INTERNAL API HELPERS
+    // ============================================
+
+    // Check if Telegram internal APIs are available
+    function hasTelegramAPI() {
+        return !!(unsafeWindow.appDownloadManager && unsafeWindow.mtprotoMessagePort);
+    }
+
+    // Get message object from Telegram's internal store
+    async function getMessageFromTelegram(peerId, messageId) {
+        try {
+            if (!unsafeWindow.mtprotoMessagePort) {
+                console.log('[TCE] mtprotoMessagePort not available');
+                return null;
+            }
+            const msg = await unsafeWindow.mtprotoMessagePort.getMessageByPeer(peerId, messageId);
+            return msg;
+        } catch (e) {
+            console.log('[TCE] Failed to get message from Telegram API:', e.message);
+            return null;
+        }
+    }
+
+    // Get media object from message
+    function getMediaFromMessage(msg) {
+        if (!msg || !msg.media) return null;
+        return msg.media.document || msg.media.photo || null;
+    }
+
+    // Download media using Telegram's internal download manager and convert to base64
+    async function downloadMediaAsBase64(media) {
+        if (!media) return null;
+
+        try {
+            // Try to get the download URL from Telegram's managers
+            if (unsafeWindow.appDownloadManager) {
+                // Get the blob/file from Telegram's cache or download it
+                const download = await unsafeWindow.appDownloadManager.download({
+                    media: media,
+                    queueId: 0,
+                    onlyCache: false
+                });
+
+                if (download) {
+                    // Convert blob to base64
+                    return new Promise((resolve) => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result);
+                        reader.onerror = () => resolve(null);
+                        if (download instanceof Blob) {
+                            reader.readAsDataURL(download);
+                        } else if (download.url) {
+                            // If it's a URL, fetch it
+                            fetch(download.url)
+                                .then(r => r.blob())
+                                .then(blob => reader.readAsDataURL(blob))
+                                .catch(() => resolve(null));
+                        } else {
+                            resolve(null);
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log('[TCE] downloadMediaAsBase64 failed:', e.message);
+        }
+
+        return null;
+    }
+
+    // Alternative: Get photo/document URL from Telegram's internal methods
+    async function getMediaUrl(media, peerId) {
+        if (!media) return null;
+
+        try {
+            // Try appPhotosManager for photos
+            if (media._ === 'photo' && unsafeWindow.appPhotosManager) {
+                const sizes = media.sizes || [];
+                const largestSize = sizes[sizes.length - 1];
+                if (largestSize) {
+                    const url = await unsafeWindow.appPhotosManager.getPhotoURL(media, largestSize);
+                    if (url) return url;
+                }
+            }
+
+            // Try appDocsManager for documents
+            if (media._ === 'document' && unsafeWindow.appDocsManager) {
+                const url = await unsafeWindow.appDocsManager.getFileURL(media);
+                if (url) return url;
+            }
+
+            // Try webpDocumentsManager
+            if (unsafeWindow.webpDocumentsManager) {
+                const url = await unsafeWindow.webpDocumentsManager.getURL(media);
+                if (url) return url;
+            }
+        } catch (e) {
+            console.log('[TCE] getMediaUrl failed:', e.message);
+        }
+
+        return null;
+    }
+
+    // Capture media using Telegram's internal API (most robust method)
+    async function captureMediaViaTelegramAPI(messageEl) {
+        const mid = messageEl.dataset.mid || messageEl.dataset.messageId;
+        const pid = messageEl.dataset.peerId || messageEl.closest('[data-peer-id]')?.dataset.peerId;
+
+        if (!mid || !pid) {
+            console.log('[TCE] Missing message ID or peer ID');
+            return null;
+        }
+
+        console.log('[TCE] Trying Telegram API for message:', mid, 'peer:', pid);
+
+        try {
+            const msg = await getMessageFromTelegram(pid, mid);
+            if (!msg) return null;
+
+            const media = getMediaFromMessage(msg);
+            if (!media) return null;
+
+            // Try to get URL first (faster)
+            const mediaUrl = await getMediaUrl(media, pid);
+            if (mediaUrl) {
+                console.log('[TCE] Got media URL from Telegram API:', mediaUrl);
+                const base64 = await captureImageFromUrl(mediaUrl);
+                if (base64) return base64;
+            }
+
+            // Fallback: download the media
+            const base64 = await downloadMediaAsBase64(media);
+            if (base64) {
+                console.log('[TCE] Got media via Telegram download manager');
+                return base64;
+            }
+        } catch (e) {
+            console.log('[TCE] Telegram API capture failed:', e.message);
+        }
+
+        return null;
+    }
+
     async function captureElement(element) {
         try {
             const canvas = await html2canvas(element, {
@@ -990,6 +1135,13 @@
 
                     // Store the thumbnail for fallback
                     const thumbnailImg = parsed.imageElement;
+
+                    // *** MOST ROBUST METHOD: Use Telegram's internal API ***
+                    // This bypasses CORS issues by using Telegram's own download manager
+                    if (!parsed.imageData && hasTelegramAPI()) {
+                        console.log('[TCE] Trying Telegram internal API (most robust)');
+                        parsed.imageData = await captureMediaViaTelegramAPI(msgEl);
+                    }
 
                     // Try Method 0: If there's a canvas element, capture it directly
                     if (!parsed.imageData && parsed.canvasElement) {
