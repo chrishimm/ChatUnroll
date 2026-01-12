@@ -300,8 +300,12 @@
         const overlay = document.createElement('div');
         overlay.id = 'tce-modal-overlay';
 
-        const today = new Date().toISOString().split('T')[0];
-        const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+        // Use local timezone for date calculation (not UTC via toISOString)
+        const todayDate = new Date();
+        const today = `${todayDate.getFullYear()}-${String(todayDate.getMonth() + 1).padStart(2, '0')}-${String(todayDate.getDate()).padStart(2, '0')}`;
+        const weekAgoDate = new Date(todayDate);
+        weekAgoDate.setDate(weekAgoDate.getDate() - 7);
+        const weekAgo = `${weekAgoDate.getFullYear()}-${String(weekAgoDate.getMonth() + 1).padStart(2, '0')}-${String(weekAgoDate.getDate()).padStart(2, '0')}`;
 
         overlay.innerHTML = `
             <div id="tce-modal">
@@ -552,34 +556,74 @@
             return separatorEl ? separatorEl.textContent.trim() : '';
         },
 
+        // Helper to normalize date to start-of-day in local timezone
+        normalizeToLocalStartOfDay(date) {
+            if (!date || isNaN(date.getTime())) return null;
+            return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
+        },
+
         parseDateText(dateText) {
             // Try to parse various date formats from Telegram
             // Format: "January 10", "10 January 2024", "Today", "Yesterday", etc.
+            // IMPORTANT: All returned dates are normalized to start-of-day in LOCAL timezone
             const today = new Date();
-            const lowerText = dateText.toLowerCase();
+            const lowerText = dateText.toLowerCase().trim();
 
             if (lowerText === 'today') {
-                return today;
+                return this.normalizeToLocalStartOfDay(today);
             }
             if (lowerText === 'yesterday') {
                 const yesterday = new Date(today);
                 yesterday.setDate(yesterday.getDate() - 1);
-                return yesterday;
+                return this.normalizeToLocalStartOfDay(yesterday);
             }
 
-            // Try parsing as date
-            const parsed = new Date(dateText);
+            // Try parsing as full date string (e.g., "10 January 2024" or "January 10, 2024")
+            let parsed = new Date(dateText);
             if (!isNaN(parsed.getTime())) {
-                return parsed;
+                // Check if the parsed date is reasonable (has correct year info)
+                // If year is 2001 (JavaScript default for "January 10"), it means no year was provided
+                if (parsed.getFullYear() !== 2001) {
+                    return this.normalizeToLocalStartOfDay(parsed);
+                }
             }
 
-            // Try adding current year
-            const withYear = new Date(`${dateText} ${today.getFullYear()}`);
+            // Try adding current year first
+            let withYear = new Date(`${dateText} ${today.getFullYear()}`);
             if (!isNaN(withYear.getTime())) {
-                return withYear;
+                // If the resulting date is in the future (more than 1 day ahead),
+                // it's likely from the previous year
+                const normalized = this.normalizeToLocalStartOfDay(withYear);
+                const todayNormalized = this.normalizeToLocalStartOfDay(today);
+                const oneDayInMs = 24 * 60 * 60 * 1000;
+
+                if (normalized.getTime() > todayNormalized.getTime() + oneDayInMs) {
+                    // Try previous year
+                    withYear = new Date(`${dateText} ${today.getFullYear() - 1}`);
+                    if (!isNaN(withYear.getTime())) {
+                        return this.normalizeToLocalStartOfDay(withYear);
+                    }
+                }
+                return normalized;
+            }
+
+            // Fallback: Try to parse the original date string and normalize
+            if (!isNaN(parsed.getTime())) {
+                return this.normalizeToLocalStartOfDay(parsed);
             }
 
             return null;
+        },
+
+        // Helper to parse YYYY-MM-DD string as local timezone date
+        parseLocalDate(dateStr, endOfDay = false) {
+            if (!dateStr) return null;
+            const parts = dateStr.split('-');
+            if (parts.length !== 3) return null;
+            if (endOfDay) {
+                return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 23, 59, 59, 999);
+            }
+            return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 0, 0, 0, 0);
         },
 
         isDateInRange(dateEl, fromDate, toDate) {
@@ -588,9 +632,11 @@
 
             if (!date) return true; // If we can't parse, include it
 
-            const from = new Date(fromDate);
-            const to = new Date(toDate);
-            to.setHours(23, 59, 59, 999);
+            // Parse as LOCAL timezone dates (not UTC)
+            const from = this.parseLocalDate(fromDate, false);
+            const to = this.parseLocalDate(toDate, true);
+
+            if (!from || !to) return true; // If we can't parse range, include it
 
             return date >= from && date <= to;
         },
@@ -1095,9 +1141,9 @@
                     const msgDate = TelegramParser.parseDateText(currentDate);
 
                     if (msgDate) {
-                        const fromDate = new Date(state.dateRange.from);
-                        const toDate = new Date(state.dateRange.to);
-                        toDate.setHours(23, 59, 59, 999);
+                        // Parse date strings as LOCAL timezone (not UTC)
+                        const fromDate = TelegramParser.parseLocalDate(state.dateRange.from, false);
+                        const toDate = TelegramParser.parseLocalDate(state.dateRange.to, true);
 
                         if (msgDate < fromDate) {
                             inDateRange = false;
