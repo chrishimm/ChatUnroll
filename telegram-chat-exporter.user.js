@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Telegram Chat Exporter
 // @namespace    https://github.com/user/ChatUnroll
-// @version      1.3.0
+// @version      2.1.0
 // @description  Export Telegram Web chat to PDF with images for LLM consumption
 // @author       ChatUnroll
 // @match        https://web.telegram.org/*
@@ -14,7 +14,7 @@
 // @run-at       document-idle
 // ==/UserScript==
 
-(function() {
+(function () {
     'use strict';
 
     // ============================================
@@ -41,7 +41,7 @@
         currentImages: 0,
         currentFileIndex: 1,
         chatName: '',
-        dateRange: { from: null, to: null },
+        exportDate: '', // Date when export was created
         imageQuality: 'full', // 'full' or 'thumbnail'
     };
 
@@ -304,29 +304,16 @@
         const overlay = document.createElement('div');
         overlay.id = 'tce-modal-overlay';
 
-        // Use local timezone for date calculation (not UTC via toISOString)
-        const todayDate = new Date();
-        const today = `${todayDate.getFullYear()}-${String(todayDate.getMonth() + 1).padStart(2, '0')}-${String(todayDate.getDate()).padStart(2, '0')}`;
-        const weekAgoDate = new Date(todayDate);
-        weekAgoDate.setDate(weekAgoDate.getDate() - 7);
-        const weekAgo = `${weekAgoDate.getFullYear()}-${String(weekAgoDate.getMonth() + 1).padStart(2, '0')}-${String(weekAgoDate.getDate()).padStart(2, '0')}`;
-
         // Get default chat name from DOM
         const defaultChatName = TelegramParser.getChatName();
 
         overlay.innerHTML = `
             <div id="tce-modal">
                 <h2>Export Chat</h2>
-                <p class="subtitle">Export messages with images to PDF for LLM analysis</p>
+                <p class="subtitle">Export from current view to the bottom of chat</p>
 
                 <label for="tce-chat-name">Chat Name</label>
                 <input type="text" id="tce-chat-name" value="${defaultChatName}" placeholder="Enter chat name" style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; margin-bottom: 20px; box-sizing: border-box; background-color: #ffffff; color: #333333;">
-
-                <label for="tce-date-from">From Date</label>
-                <input type="date" id="tce-date-from" value="${weekAgo}">
-
-                <label for="tce-date-to">To Date</label>
-                <input type="date" id="tce-date-to" value="${today}">
 
                 <label for="tce-format">Export Format</label>
                 <select id="tce-format" style="width: 100%; padding: 12px 16px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 16px; margin-bottom: 20px; box-sizing: border-box; background-color: #ffffff; color: #333333;">
@@ -428,35 +415,42 @@
     // ============================================
 
     const TelegramParser = {
-        // Selectors for Telegram Web K (newer version) - Updated Jan 2026
+        // Selectors for Telegram Web K - Updated based on actual DOM analysis Jan 2026
         selectors: {
-            // Message container
-            messagesContainer: '.bubbles-inner, .messages-container, #column-center .scrollable-content, .chatlist',
-            // Individual message
-            message: '.bubble:not(.is-date):not(.is-service), .message:not(.service), .Message',
-            // Message text content
-            messageText: '.message, .text-content, .message-content, .text, .translatable-message',
-            // Sender name
-            senderName: '.name, .peer-title, .title, .message-title, .sender-title',
-            // Timestamp
-            timestamp: '.time, .time-inner, .message-time, .MessageMeta time, .meta time',
+            // Message container (where all bubbles live)
+            messagesContainer: '.bubbles-inner',
+            // Individual message bubble (exclude date separators and service messages)
+            message: '.bubble.channel-post, .bubble:not(.is-date):not(.service)',
+            // Message text content - SPECIFICALLY inside .message div, NOT in .reply
+            messageText: '.bubble-content > .message .translatable-message',
+            // Sender name (for groups - channels usually hide name)
+            senderName: '.bubble-content > .name .peer-title',
+            // Timestamp - inside .message > .time
+            timestamp: '.message .time .i18n, .message .time-inner',
             // Date separator
-            dateSeparator: '.bubble.is-date, .service-msg, .date-group, .bubble.is-service',
-            // Media (images) - more comprehensive selectors
-            mediaImage: '.attachment img, .media-photo img, img.media-photo, .media-container img, .media-inner img, canvas.thumbnail, .photo img, .media-photo-container img, img[src*="telegram"]',
-            // Media wrapper that can be clicked
-            mediaWrapper: '.attachment, .media-photo, .media-container, .media-inner, .photo, .media-photo-container',
+            dateSeparator: '.bubble.is-date',
+            // Media (images) - ONLY in .attachment, NOT in .reply-media
+            mediaImage: '.bubble-content > .attachment img.media-photo',
+            // Media wrapper that can be clicked to open viewer
+            mediaWrapper: '.bubble-content > .attachment.media-container',
+            // Reply element
+            replyElement: '.bubble-content > .reply',
+            replySender: '.reply .reply-title .peer-title',
+            replyText: '.reply .reply-subtitle .translatable-message',
             // Full image viewer
-            imageViewer: '.media-viewer-movers, .media-viewer-whole, #media-viewer, .MediaViewer, .media-viewer',
-            imageViewerImg: '.media-viewer-movers img, .media-viewer-whole img, #media-viewer img, .MediaViewer img, .media-viewer img, .media-viewer-aspecter img',
-            // Scrollable container
-            scrollContainer: '.bubbles, .scrollable, #column-center .scrollable, .Transition__slide--active .scrollable',
+            imageViewer: '.media-viewer-whole, .media-viewer-movers',
+            imageViewerImg: '.media-viewer-whole img, .media-viewer-movers img, .media-viewer-aspecter img',
+            // Scrollable container - the actual bubbles scroll area
+            scrollContainer: '.bubbles.scrollable-y, .bubbles',
         },
 
         getChatName() {
             // Try multiple selectors to find the chat name
             // Priority: specific chat info > header title > peer title
             const selectors = [
+                // User specific (robust version without is-pinned-message-shown dependence)
+                '#column-center .chat-info-container .chat-info .content .top span',
+                '#column-center > div.chats-container.tabs-container > div > div.sidebar-header.topbar > div.chat-info-container > div.chat-info > div > div.content > div.top > div > span',
                 '.chat-info .info .title',           // Chat info panel
                 '.chat-info .content .title',        // Alternative chat info
                 '.top .chat-info .title',            // Top bar chat info
@@ -487,10 +481,42 @@
         },
 
         getScrollContainer() {
-            for (const selector of this.selectors.scrollContainer.split(', ')) {
+            // The actual scroll container in Telegram Web K is NOT .bubbles
+            // It's a .scrollable.scrollable-y element inside #column-center
+            const selectors = [
+                '#column-center .scrollable.scrollable-y',  // Main chat scroll container
+                '.chat .scrollable.scrollable-y',
+                '.bubbles-inner-container',
+            ];
+
+            for (const selector of selectors) {
                 const el = document.querySelector(selector);
-                if (el) return el;
+                if (el) {
+                    const style = getComputedStyle(el);
+                    const canScroll = el.scrollHeight > el.clientHeight &&
+                                     (style.overflowY === 'auto' || style.overflowY === 'scroll');
+                    if (canScroll) {
+                        console.log(`[TCE] Found scroll container: ${selector}, scrollHeight: ${el.scrollHeight}, clientHeight: ${el.clientHeight}, scrollTop: ${el.scrollTop}`);
+                        return el;
+                    }
+                }
             }
+
+            // Fallback: find the scrollable-y element that's NOT the chat list
+            const allScrollables = document.querySelectorAll('.scrollable.scrollable-y');
+            for (const el of allScrollables) {
+                // Skip chat list (has chatlist-parts class)
+                if (el.classList.contains('chatlist-parts') || el.classList.contains('folders-scrollable')) {
+                    continue;
+                }
+                const style = getComputedStyle(el);
+                if (el.scrollHeight > el.clientHeight && style.overflowY === 'auto') {
+                    console.log(`[TCE] Using fallback scroll container: scrollHeight: ${el.scrollHeight}, clientHeight: ${el.clientHeight}`);
+                    return el;
+                }
+            }
+
+            console.log('[TCE] WARNING: Could not find scroll container!');
             return null;
         },
 
@@ -517,80 +543,98 @@
                 element: messageEl,
             };
 
-            // Get sender
-            const senderEl = messageEl.querySelector(this.selectors.senderName);
+            // Get bubble-content element
+            const bubbleContent = messageEl.querySelector('.bubble-content');
+            if (!bubbleContent) {
+                console.log('[TCE] No bubble-content found in message');
+                return result;
+            }
+
+            // Get sender (for channels, use channel name from chat header)
+            // Channels usually have hide-name class, so sender might be empty
+            const senderEl = bubbleContent.querySelector('.name .peer-title');
             if (senderEl) {
                 result.sender = senderEl.textContent.trim();
+            } else if (messageEl.classList.contains('channel-post')) {
+                // For channel posts, use channel name
+                result.sender = state.chatName || 'Channel';
             }
 
             // Check if it's outgoing (from me)
-            if (messageEl.classList.contains('is-out') || messageEl.classList.contains('outgoing')) {
+            if (messageEl.classList.contains('is-out')) {
                 result.sender = result.sender || 'Me';
             }
 
-            // Get timestamp - extract only the time portion
-            const timeEl = messageEl.querySelector(this.selectors.timestamp);
-            if (timeEl) {
-                let timeText = timeEl.textContent.trim();
-                // Extract time pattern (HH:MM or H:MM) from potentially messy text
-                const timeMatch = timeText.match(/(\d{1,2}:\d{2})/);
-                if (timeMatch) {
-                    result.time = timeMatch[1];
-                } else {
-                    // Clean up the text - remove non-printable chars and extra content
-                    result.time = timeText.replace(/[^\d:APMapm\s]/g, '').trim().slice(0, 10);
+            // Get timestamp from data-timestamp attribute (most reliable)
+            const timestamp = messageEl.dataset.timestamp;
+            if (timestamp) {
+                const date = new Date(parseInt(timestamp) * 1000);
+                result.time = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+                result.date = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+            } else {
+                // Fallback: try to extract from .time element
+                const timeEl = messageEl.querySelector('.message .time .i18n, .message .time-inner');
+                if (timeEl) {
+                    const timeMatch = timeEl.textContent.match(/(\d{1,2}:\d{2})/);
+                    if (timeMatch) {
+                        result.time = timeMatch[1];
+                    }
                 }
             }
 
-            // Get text content
-            const textEl = messageEl.querySelector(this.selectors.messageText);
-            if (textEl) {
-                result.content = textEl.textContent.trim();
+            // Get text content - ONLY from .message > .translatable-message (NOT from .reply)
+            const messageDiv = bubbleContent.querySelector(':scope > .message');
+            if (messageDiv) {
+                const textEl = messageDiv.querySelector('.translatable-message');
+                if (textEl) {
+                    result.content = textEl.textContent.trim();
+                }
             }
 
-            // Check for image - including background images
-            let imgEl = messageEl.querySelector(this.selectors.mediaImage);
-            const mediaWrapper = messageEl.querySelector(this.selectors.mediaWrapper);
+            // Capture reply info if this is a reply (has .reply element directly in bubble-content)
+            const replyEl = bubbleContent.querySelector(':scope > .reply');
+            if (replyEl) {
+                result.isReply = true;
+                result.replyTo = {};
 
-            // If no img tag found, check for background-image in media wrapper
-            if (!imgEl && mediaWrapper) {
-                const bgStyle = window.getComputedStyle(mediaWrapper).backgroundImage;
-                if (bgStyle && bgStyle !== 'none') {
-                    // Extract URL from background-image
-                    const urlMatch = bgStyle.match(/url\(["']?([^"')]+)["']?\)/);
-                    if (urlMatch) {
-                        result.type = 'image';
-                        result.backgroundImageUrl = urlMatch[1];
-                        result.mediaWrapper = mediaWrapper;
+                // Get sender from reply-title
+                const replySender = replyEl.querySelector('.reply-title .peer-title');
+                if (replySender) {
+                    // Remove emoji images from text
+                    const cloned = replySender.cloneNode(true);
+                    cloned.querySelectorAll('img.emoji').forEach(e => e.remove());
+                    result.replyTo.sender = cloned.textContent.trim();
+                }
+
+                // Get content from reply-subtitle
+                const replySubtitle = replyEl.querySelector('.reply-subtitle');
+                if (replySubtitle) {
+                    const replyTextEl = replySubtitle.querySelector('.translatable-message');
+                    if (replyTextEl) {
+                        result.replyTo.content = replyTextEl.textContent.trim();
+                    } else {
+                        result.replyTo.content = replySubtitle.textContent.trim();
                     }
                 }
 
-                // Also check child elements for background images
-                const childWithBg = mediaWrapper.querySelector('[style*="background-image"]');
-                if (childWithBg) {
-                    const childBgStyle = childWithBg.style.backgroundImage;
-                    const urlMatch = childBgStyle.match(/url\(["']?([^"')]+)["']?\)/);
-                    if (urlMatch) {
-                        result.type = 'image';
-                        result.backgroundImageUrl = urlMatch[1];
-                        result.mediaWrapper = mediaWrapper;
-                    }
+                // Check if reply has media
+                const replyMedia = replyEl.querySelector('.reply-media');
+                if (replyMedia) {
+                    result.replyTo.hasMedia = true;
                 }
+            }
 
-                // Check for canvas (Telegram sometimes uses canvas for thumbnails)
-                const canvas = mediaWrapper.querySelector('canvas');
-                if (canvas) {
+            // Check for image - ONLY in .attachment (NOT in .reply-media)
+            // Using :scope to ensure we only get direct children of bubble-content
+            const attachmentEl = bubbleContent.querySelector(':scope > .attachment');
+            if (attachmentEl) {
+                const imgEl = attachmentEl.querySelector('img.media-photo');
+                if (imgEl) {
                     result.type = 'image';
-                    result.canvasElement = canvas;
-                    result.mediaWrapper = mediaWrapper;
+                    result.imageElement = imgEl;
+                    result.imageUrl = imgEl.src || '';
+                    result.mediaWrapper = attachmentEl;
                 }
-            }
-
-            if (imgEl) {
-                result.type = 'image';
-                result.imageElement = imgEl;
-                result.imageUrl = imgEl.src || imgEl.dataset.src || '';
-                result.mediaWrapper = mediaWrapper || messageEl.querySelector(this.selectors.mediaWrapper);
             }
 
             return result;
@@ -598,25 +642,6 @@
 
         getDateFromSeparator(separatorEl) {
             return separatorEl ? separatorEl.textContent.trim() : '';
-        },
-
-        // Find the nearest date separator before this message element
-        // This searches backwards through siblings, not just the immediate previous sibling
-        findNearestDateSeparator(messageEl) {
-            let currentEl = messageEl.previousElementSibling;
-            let maxSteps = 50; // Limit search to prevent infinite loops
-
-            while (currentEl && maxSteps > 0) {
-                if (currentEl.classList.contains('is-date') ||
-                    currentEl.classList.contains('service-msg') ||
-                    currentEl.classList.contains('date-group') ||
-                    currentEl.classList.contains('bubble') && currentEl.querySelector('.service-msg')) {
-                    return currentEl;
-                }
-                currentEl = currentEl.previousElementSibling;
-                maxSteps--;
-            }
-            return null;
         },
 
         // Extract date from message's internal data attributes (more reliable than DOM text)
@@ -658,148 +683,66 @@
             return new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
         },
 
-        parseDateText(dateText, referenceDate = null) {
-            // Try to parse various date formats from Telegram
-            // Format: "January 10", "10 January 2024", "Today", "Yesterday", etc.
-            // IMPORTANT: All returned dates are normalized to start-of-day in LOCAL timezone
-            //
-            // referenceDate: Optional date to use as reference for year inference
-            //                (useful when processing messages in chronological order)
-            const today = referenceDate || new Date();
-            const lowerText = (dateText || '').toLowerCase().trim();
-
-            if (!lowerText) {
-                console.log('[TCE] parseDateText: empty date text');
-                return null;
-            }
-
-            if (lowerText === 'today') {
-                return this.normalizeToLocalStartOfDay(today);
-            }
-            if (lowerText === 'yesterday') {
-                const yesterday = new Date(today);
-                yesterday.setDate(yesterday.getDate() - 1);
-                return this.normalizeToLocalStartOfDay(yesterday);
-            }
-
-            // Check for relative date patterns (e.g., "2 days ago", "last week")
-            const daysAgoMatch = lowerText.match(/(\d+)\s*days?\s*ago/i);
-            if (daysAgoMatch) {
-                const daysAgo = parseInt(daysAgoMatch[1]);
-                const date = new Date(today);
-                date.setDate(date.getDate() - daysAgo);
-                return this.normalizeToLocalStartOfDay(date);
-            }
-
-            // Try parsing as full date string (e.g., "10 January 2024" or "January 10, 2024")
-            let parsed = new Date(dateText);
-            if (!isNaN(parsed.getTime())) {
-                // Check if the parsed date is reasonable (has correct year info)
-                // If year is 2001 (JavaScript default for "January 10"), it means no year was provided
-                if (parsed.getFullYear() !== 2001) {
-                    console.log(`[TCE] parseDateText: full date parsed - ${dateText} -> ${parsed.toDateString()}`);
-                    return this.normalizeToLocalStartOfDay(parsed);
-                }
-            }
-
-            // Try adding current year first
-            let withYear = new Date(`${dateText} ${today.getFullYear()}`);
-            if (!isNaN(withYear.getTime())) {
-                const normalized = this.normalizeToLocalStartOfDay(withYear);
-                const todayNormalized = this.normalizeToLocalStartOfDay(today);
-                const oneDayInMs = 24 * 60 * 60 * 1000;
-
-                // If the resulting date is in the future (more than 1 day ahead),
-                // it's likely from the previous year
-                if (normalized.getTime() > todayNormalized.getTime() + oneDayInMs) {
-                    // Try previous year
-                    withYear = new Date(`${dateText} ${today.getFullYear() - 1}`);
-                    if (!isNaN(withYear.getTime())) {
-                        console.log(`[TCE] parseDateText: date in future, using previous year - ${dateText} -> ${withYear.toDateString()}`);
-                        return this.normalizeToLocalStartOfDay(withYear);
-                    }
-                }
-
-                console.log(`[TCE] parseDateText: added current year - ${dateText} -> ${normalized.toDateString()}`);
-                return normalized;
-            }
-
-            // Try different date format patterns manually
-            // Pattern: "3 January" or "January 3" without year
-            const monthNames = ['january', 'february', 'march', 'april', 'may', 'june',
-                               'july', 'august', 'september', 'october', 'november', 'december'];
-            for (let i = 0; i < monthNames.length; i++) {
-                const monthName = monthNames[i];
-                // Match "3 January" or "January 3"
-                const dayFirstMatch = lowerText.match(new RegExp(`(\\d{1,2})\\s+${monthName}`));
-                const monthFirstMatch = lowerText.match(new RegExp(`${monthName}\\s+(\\d{1,2})`));
-                const day = dayFirstMatch ? parseInt(dayFirstMatch[1]) : (monthFirstMatch ? parseInt(monthFirstMatch[1]) : null);
-
-                if (day && day >= 1 && day <= 31) {
-                    // Try with current year first
-                    let date = new Date(today.getFullYear(), i, day);
-                    const todayNormalized = this.normalizeToLocalStartOfDay(today);
-
-                    // If date is in the future, use previous year
-                    if (date.getTime() > todayNormalized.getTime() + 24 * 60 * 60 * 1000) {
-                        date = new Date(today.getFullYear() - 1, i, day);
-                    }
-
-                    console.log(`[TCE] parseDateText: manual parse - ${dateText} -> ${date.toDateString()}`);
-                    return this.normalizeToLocalStartOfDay(date);
-                }
-            }
-
-            // Fallback: Try to parse the original date string and normalize
-            if (!isNaN(parsed.getTime())) {
-                console.log(`[TCE] parseDateText: fallback parse - ${dateText} -> ${parsed.toDateString()}`);
-                return this.normalizeToLocalStartOfDay(parsed);
-            }
-
-            console.log(`[TCE] parseDateText: failed to parse - ${dateText}`);
-            return null;
-        },
-
-        // Helper to parse YYYY-MM-DD string as local timezone date
-        parseLocalDate(dateStr, endOfDay = false) {
-            if (!dateStr) return null;
-            const parts = dateStr.split('-');
-            if (parts.length !== 3) return null;
-            if (endOfDay) {
-                return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 23, 59, 59, 999);
-            }
-            return new Date(parseInt(parts[0]), parseInt(parts[1]) - 1, parseInt(parts[2]), 0, 0, 0, 0);
-        },
-
-        isDateInRange(dateEl, fromDate, toDate) {
-            const dateText = this.getDateFromSeparator(dateEl);
-            const date = this.parseDateText(dateText);
-
-            if (!date) return true; // If we can't parse, include it
-
-            // Parse as LOCAL timezone dates (not UTC)
-            const from = this.parseLocalDate(fromDate, false);
-            const to = this.parseLocalDate(toDate, true);
-
-            if (!from || !to) return true; // If we can't parse range, include it
-
-            return date >= from && date <= to;
-        },
-
         async openFullImage(mediaWrapper) {
             if (!mediaWrapper) return null;
 
+            // SAFETY CHECK: Don't click if it's an external link
+            // 1. Find the actual click target (prefer the image itself)
+            let clickTarget = mediaWrapper.querySelector('img') || mediaWrapper.querySelector('.canvas') || mediaWrapper;
+
+            // 2. Check if it's inside an anchor tag
+            const anchor = clickTarget.closest('a');
+            if (anchor) {
+                const href = anchor.getAttribute('href');
+                // If it has an href that processes logic (like blob:) or is internal (telegram.org), it's usually fine
+                // But if it looks like an external website, ABORT
+                if (href && !href.startsWith('tg://') && !href.includes('telegram.org') && !href.startsWith('blob:') && href.includes('http')) {
+                    console.log(`[TCE] Skipping external link image: ${href}`);
+                    return null;
+                }
+            }
+
             // Click to open
-            mediaWrapper.click();
+            clickTarget.click();
 
             // Wait for viewer to open
             await sleep(CONFIG.imageLoadDelay);
 
             // Find the full image in viewer
-            const viewer = document.querySelector(this.selectors.imageViewer);
-            if (!viewer) return null;
+            // Try multiple selectors as Telegram changes classes often
+            const viewerSelectors = [
+                this.selectors.imageViewer,
+                '.MediaViewer',
+                '.media-viewer',
+                '#media-viewer',
+                '.media-viewer-whole'
+            ];
 
-            const fullImg = document.querySelector(this.selectors.imageViewerImg);
+            let viewer = null;
+            for (const sel of viewerSelectors) {
+                viewer = document.querySelector(sel);
+                if (viewer) break;
+            }
+
+            if (!viewer) {
+                // console.log('[TCE] Media viewer did not open');
+                return null;
+            }
+
+            const imgSelectors = [
+                this.selectors.imageViewerImg,
+                '.MediaViewer img',
+                '.media-viewer img',
+                '.media-viewer-aspecter img',
+                'img.media-viewer-image' // Hypothesized
+            ];
+
+            let fullImg = null;
+            for (const sel of imgSelectors) {
+                fullImg = document.querySelector(sel);
+                if (fullImg) break;
+            }
+
             if (!fullImg) return null;
 
             // Wait for image to load
@@ -1181,28 +1124,16 @@
     async function startExport() {
         if (state.isExporting) return;
 
-        const fromDate = document.getElementById('tce-date-from').value;
-        const toDate = document.getElementById('tce-date-to').value;
         const customChatName = document.getElementById('tce-chat-name').value.trim();
         const imageQuality = document.getElementById('tce-image-quality').value;
-
-        if (!fromDate || !toDate) {
-            showToast('Please select both dates', 'error');
-            return;
-        }
-
-        if (new Date(fromDate) > new Date(toDate)) {
-            showToast('From date must be before To date', 'error');
-            return;
-        }
 
         state.isExporting = true;
         state.messages = [];
         state.currentImages = 0;
         state.currentFileIndex = 1;
-        state.dateRange = { from: fromDate, to: toDate };
         state.chatName = customChatName || TelegramParser.getChatName();
         state.imageQuality = imageQuality; // 'full' or 'thumbnail'
+        state.exportDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
         // Update UI
         document.getElementById('tce-floating-btn').classList.add('exporting');
@@ -1241,256 +1172,85 @@
             throw new Error('Cannot find chat scroll container. Make sure a chat is open.');
         }
 
-        updateProgress(0, 'Scrolling to find messages...');
-
-        // First, scroll to top to load older messages
-        let lastScrollTop = -1;
-        let scrollAttempts = 0;
-        const maxScrollAttempts = 100;
-
-        // Scroll to top first
-        while (scrollAttempts < maxScrollAttempts && state.isExporting) {
-            scrollContainer.scrollTop = 0;
-            await sleep(CONFIG.scrollDelay);
-
-            if (scrollContainer.scrollTop === lastScrollTop) {
-                break;
-            }
-            lastScrollTop = scrollContainer.scrollTop;
-            scrollAttempts++;
-            updateProgress(Math.min(scrollAttempts, 30), `Loading older messages... (scroll ${scrollAttempts})`);
-        }
+        updateProgress(0, 'Starting export from current view...');
+        console.log('[TCE] Mode: Capture-All (no date filtering) - collecting everything from current position to bottom');
 
         await sleep(500);
 
-        // Now collect messages while scrolling down
-        updateProgress(30, 'Collecting messages...');
+        // Collect messages while scrolling down
+        updateProgress(5, 'Collecting messages...');
 
         const collectedIds = new Set();
-        let currentDate = '';
-        let inDateRange = false;
-        let passedDateRange = false;
 
-        lastScrollTop = -1;
-        scrollAttempts = 0;
+        let scrollAttempts = 0;
+        let noNewScrollCount = 0;
+        const maxScrollAttempts = 300; // Safety limit to prevent infinite scrolling
 
-        while (!passedDateRange && scrollAttempts < maxScrollAttempts * 2 && state.isExporting) {
+        while (scrollAttempts < maxScrollAttempts && state.isExporting) {
             // Find all visible messages
             const messageEls = TelegramParser.getAllMessages();
 
             for (const msgEl of messageEls) {
                 if (!state.isExporting) break;
 
-                // Generate unique ID for this message
-                const msgId = msgEl.dataset.mid || msgEl.dataset.messageId || msgEl.textContent.slice(0, 50);
+                // Only process actual message bubbles (not date separators or service messages)
+                if (msgEl.classList.contains('is-date') || msgEl.classList.contains('service')) {
+                    continue;
+                }
+
+                // Generate unique ID for this message using data-mid attribute
+                const msgId = msgEl.dataset.mid;
+                if (!msgId) {
+                    console.log('[TCE] Skipping message without data-mid');
+                    continue;
+                }
                 if (collectedIds.has(msgId)) continue;
 
-                // IMPROVED: Find date for this message using multiple methods
-                let msgDate = null;
-                let dateSource = 'none';
-
-                // Method 1: Check immediate previous sibling for date separator (fastest)
-                const immediateSeparator = msgEl.previousElementSibling;
-                if (immediateSeparator && (
-                    immediateSeparator.classList.contains('is-date') ||
-                    immediateSeparator.classList.contains('service-msg') ||
-                    immediateSeparator.classList.contains('date-group')
-                )) {
-                    currentDate = TelegramParser.getDateFromSeparator(immediateSeparator);
-                    msgDate = TelegramParser.parseDateText(currentDate);
-                    dateSource = 'immediate-separator';
+                // Check if message is in or below viewport
+                const rect = msgEl.getBoundingClientRect();
+                const containerRect = scrollContainer.getBoundingClientRect();
+                // Skip messages that are completely above the viewport
+                if (rect.bottom < containerRect.top) {
+                    continue;
                 }
 
-                // Method 2: If no immediate separator, search for nearest date separator
-                if (!msgDate) {
-                    const nearestSeparator = TelegramParser.findNearestDateSeparator(msgEl);
-                    if (nearestSeparator) {
-                        const separatorText = TelegramParser.getDateFromSeparator(nearestSeparator);
-                        msgDate = TelegramParser.parseDateText(separatorText);
-                        if (msgDate) {
-                            currentDate = separatorText;
-                            dateSource = 'nearest-separator';
-                        }
-                    }
-                }
-
-                // Method 3: Try to extract date from message element's data attributes
-                if (!msgDate) {
-                    msgDate = TelegramParser.getDateFromMessageElement(msgEl);
-                    if (msgDate) {
-                        // Format the date for display
-                        currentDate = msgDate.toLocaleDateString('en-US', {
-                            month: 'long',
-                            day: 'numeric',
-                            year: 'numeric'
-                        });
-                        dateSource = 'message-data';
-                    }
-                }
-
-                // Method 4: If still no date and we have a previous known date, use that
-                // This handles messages that are on the same day as previous messages
-                if (!msgDate && currentDate) {
-                    msgDate = TelegramParser.parseDateText(currentDate);
-                    dateSource = 'inherited';
-                }
-
-                // Now check if the message is within the date range
-                if (msgDate) {
-                    // Parse date strings as LOCAL timezone (not UTC)
-                    const fromDate = TelegramParser.parseLocalDate(state.dateRange.from, false);
-                    const toDate = TelegramParser.parseLocalDate(state.dateRange.to, true);
-
-                    if (msgDate < fromDate) {
-                        inDateRange = false;
-                        console.log(`[TCE] Message outside range (before): ${currentDate} < ${state.dateRange.from} [${dateSource}]`);
-                        continue;
-                    } else if (msgDate > toDate) {
-                        console.log(`[TCE] Message outside range (after): ${currentDate} > ${state.dateRange.to} [${dateSource}]`);
-                        passedDateRange = true;
-                        break;
-                    } else {
-                        inDateRange = true;
-                    }
-                }
-
-                // If we haven't established a date yet, include message but log warning
-                if (!msgDate && !currentDate) {
-                    console.log('[TCE] Warning: No date found for message, including it anyway');
-                    inDateRange = true; // Include messages when date is unknown
-                }
-
-                // If we have a date but message is not in range, skip
-                if (!inDateRange && currentDate) continue;
-
-                // Parse the message
+                // Parse message content
                 const parsed = TelegramParser.parseMessage(msgEl);
-                parsed.date = currentDate;
+
+                // Mark as collected
                 collectedIds.add(msgId);
 
-                // If it has an image, capture it
-                if (parsed.type === 'image' && (parsed.mediaWrapper || parsed.imageElement || parsed.backgroundImageUrl || parsed.canvasElement)) {
+                // Log for debugging
+                console.log(`[TCE] Collected message ${msgId}: ${parsed.content?.slice(0, 50) || '[no text]'} | type: ${parsed.type}`);
+
+                // HANDLE IMAGES - Direct capture only (no clicking to avoid navigation issues)
+                if (parsed.type === 'image' && parsed.imageElement) {
                     // Check image limit
                     if (state.currentImages >= CONFIG.maxImagesPerFile) {
-                        // Save current batch and start new file
                         await saveBatchToPDF();
                     }
 
-                    const qualityMode = state.imageQuality || 'full';
                     updateProgress(
                         30 + (state.messages.length % 100) * 0.5,
-                        `Capturing image ${state.currentImages + 1} (${qualityMode} quality)...`,
+                        `Capturing image ${state.currentImages + 1}...`,
                         { messages: state.messages.length, images: state.currentImages, files: state.currentFileIndex }
                     );
 
-                    // Store the thumbnail for fallback
-                    const thumbnailImg = parsed.imageElement;
+                    // Direct capture from attachment img element
+                    // No clicking - just capture what's visible to avoid navigation issues
+                    const imgSrc = parsed.imageElement.src;
+                    console.log(`[TCE] Capturing image: ${imgSrc?.slice(0, 80)}... (${parsed.imageElement.naturalWidth}x${parsed.imageElement.naturalHeight})`);
 
-                    // *** FULL RESOLUTION MODE ***
-                    // Prioritize methods that get full resolution images
-                    if (qualityMode === 'full') {
-                        // Method 1: Use Telegram's internal API (usually full resolution)
-                        if (!parsed.imageData && hasTelegramAPI()) {
-                            console.log('[TCE] [FULL] Trying Telegram internal API');
-                            parsed.imageData = await captureMediaViaTelegramAPI(msgEl);
-                        }
+                    parsed.imageData = await captureImageFromSrc(parsed.imageElement);
 
-                        // Method 2: Open full image viewer and capture (guaranteed full resolution)
-                        if (!parsed.imageData && parsed.mediaWrapper) {
-                            console.log('[TCE] [FULL] Opening full image viewer for high-res capture');
-                            const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
-                            if (fullImg) {
-                                // Wait extra time for high-res image to load
-                                await sleep(CONFIG.imageLoadDelay);
-
-                                // Save the full image URL
-                                if (fullImg.src && !parsed.imageUrl) {
-                                    parsed.imageUrl = fullImg.src;
-                                }
-
-                                // Capture with high quality
-                                parsed.imageData = await captureImageFromSrc(fullImg);
-
-                                // If direct capture failed, try with fallback
-                                if (!parsed.imageData) {
-                                    parsed.imageData = await captureImageWithFallback(fullImg, thumbnailImg);
-                                }
-
-                                TelegramParser.closeImageViewer();
-                                await sleep(200);
-                            }
-                        }
-
-                        // Method 3: Try background image URL (might be full res)
-                        if (!parsed.imageData && parsed.backgroundImageUrl) {
-                            console.log('[TCE] [FULL] Trying background image URL:', parsed.backgroundImageUrl);
-                            parsed.imageData = await captureImageFromUrl(parsed.backgroundImageUrl);
-                        }
-
-                        // Method 4: Fallback to thumbnail if no full res available
-                        if (!parsed.imageData && thumbnailImg) {
-                            console.log('[TCE] [FULL] Falling back to thumbnail');
-                            parsed.imageData = await captureImageFromSrc(thumbnailImg);
-                        }
+                    if (parsed.imageData) {
+                        state.currentImages++;
+                        console.log(`[TCE] Image captured successfully`);
+                    } else {
+                        // Store URL for HTML fallback
+                        console.log(`[TCE] Direct capture failed, storing URL for HTML fallback`);
+                        parsed.imageUrl = imgSrc;
                     }
-                    // *** THUMBNAIL MODE ***
-                    // Prioritize speed over quality
-                    else {
-                        // Method 1: Use Telegram's internal API
-                        if (!parsed.imageData && hasTelegramAPI()) {
-                            console.log('[TCE] [THUMB] Trying Telegram internal API');
-                            parsed.imageData = await captureMediaViaTelegramAPI(msgEl);
-                        }
-
-                        // Method 2: Capture from canvas (thumbnail)
-                        if (!parsed.imageData && parsed.canvasElement) {
-                            console.log('[TCE] [THUMB] Capturing from canvas');
-                            try {
-                                parsed.imageData = parsed.canvasElement.toDataURL('image/jpeg', 0.8);
-                            } catch (e) {
-                                console.log('[TCE] Canvas capture failed:', e.message);
-                            }
-                        }
-
-                        // Method 3: Capture from thumbnail directly
-                        if (!parsed.imageData && thumbnailImg) {
-                            console.log('[TCE] [THUMB] Capturing from thumbnail');
-                            parsed.imageData = await captureImageFromSrc(thumbnailImg);
-                        }
-
-                        // Method 4: Try background image URL
-                        if (!parsed.imageData && parsed.backgroundImageUrl) {
-                            console.log('[TCE] [THUMB] Trying background image URL');
-                            parsed.imageData = await captureImageFromUrl(parsed.backgroundImageUrl);
-                        }
-
-                        // Method 5: Open full image viewer only as last resort
-                        if (!parsed.imageData && parsed.mediaWrapper) {
-                            console.log('[TCE] [THUMB] Opening full image viewer as fallback');
-                            const fullImg = await TelegramParser.openFullImage(parsed.mediaWrapper);
-                            if (fullImg) {
-                                if (fullImg.src && !parsed.imageUrl) {
-                                    parsed.imageUrl = fullImg.src;
-                                }
-                                parsed.imageData = await captureImageWithFallback(fullImg, thumbnailImg);
-                                TelegramParser.closeImageViewer();
-                                await sleep(200);
-                            }
-                        }
-                    }
-
-                    // *** LAST RESORT FALLBACKS (for both modes) ***
-                    if (!parsed.imageData && thumbnailImg) {
-                        console.log('[TCE] Last resort: html2canvas on thumbnail');
-                        parsed.imageData = await captureElement(thumbnailImg);
-                    }
-
-                    if (!parsed.imageData && parsed.mediaWrapper) {
-                        console.log('[TCE] Last resort: html2canvas on media wrapper');
-                        parsed.imageData = await captureElement(parsed.mediaWrapper);
-                    }
-
-                    state.currentImages++;
                 }
 
                 state.messages.push(parsed);
@@ -1508,14 +1268,22 @@
                 }
             }
 
-            // Scroll down
+            // Scroll down logic
             const prevScrollTop = scrollContainer.scrollTop;
-            scrollContainer.scrollTop += scrollContainer.clientHeight * 0.8;
+            scrollContainer.scrollTop += scrollContainer.clientHeight * 0.5; // Smaller scroll steps for reliability
             await sleep(CONFIG.scrollDelay);
 
-            if (scrollContainer.scrollTop === prevScrollTop) {
-                // Reached bottom
-                break;
+            if (Math.abs(scrollContainer.scrollTop - prevScrollTop) < 5) {
+                noNewScrollCount++;
+                // Wait longer and check again to be sure
+                await sleep(1000);
+                if (noNewScrollCount >= 3) {
+                    // Reached bottom definitely
+                    console.log('[TCE] Reached bottom of chat');
+                    break;
+                }
+            } else {
+                noNewScrollCount = 0;
             }
             scrollAttempts++;
         }
@@ -1591,8 +1359,6 @@
             pdf.setTextColor(100, 100, 100);
             pdf.text(`Exported: ${new Date().toLocaleString()}`, margin, yPos);
             yPos += 5;
-            pdf.text(`Date Range: ${state.dateRange.from} to ${state.dateRange.to}`, margin, yPos);
-            yPos += 5;
             pdf.text(`Part ${i + 1} of ${chunks.length} | Messages: ${chunk.length}`, margin, yPos);
             yPos += 10;
 
@@ -1628,6 +1394,29 @@
                 const senderLine = `[${msg.time || '??:??'}] ${sanitizeText(msg.sender) || 'Unknown'}:`;
                 pdf.text(senderLine, margin, yPos);
                 yPos += 5;
+
+                // Reply preview (if this is a reply)
+                if (msg.isReply && msg.replyTo) {
+                    pdf.setFontSize(9);
+                    pdf.setFont('helvetica', 'italic');
+                    pdf.setTextColor(100, 100, 100);
+
+                    const replyHeader = `> Replying to ${sanitizeText(msg.replyTo.sender) || 'someone'}:`;
+                    pdf.text(replyHeader, margin + 5, yPos);
+                    yPos += 4;
+
+                    const replyText = msg.replyTo.content
+                        ? `> "${sanitizeText(msg.replyTo.content).slice(0, 80)}${msg.replyTo.content.length > 80 ? '...' : ''}"`
+                        : (msg.replyTo.hasMedia ? '> [Media]' : '> [Message]');
+                    const replyLines = pdf.splitTextToSize(replyText, contentWidth - 10);
+                    for (const line of replyLines.slice(0, 2)) { // Max 2 lines for reply preview
+                        pdf.text(line, margin + 5, yPos);
+                        yPos += 4;
+                    }
+
+                    pdf.setTextColor(0, 0, 0);
+                    yPos += 2;
+                }
 
                 // Message content
                 if (msg.content) {
@@ -1674,8 +1463,8 @@
 
             // Generate filename
             const filename = chunks.length > 1
-                ? `${sanitizeFilename(state.chatName)}_${state.dateRange.from}_part${i + 1}.pdf`
-                : `${sanitizeFilename(state.chatName)}_${state.dateRange.from}_to_${state.dateRange.to}.pdf`;
+                ? `${sanitizeFilename(state.chatName)}_${state.exportDate}_part${i + 1}.pdf`
+                : `${sanitizeFilename(state.chatName)}_${state.exportDate}.pdf`;
 
             pdfFiles.push({
                 filename,
@@ -1725,6 +1514,16 @@
                         <span class="sender">${escapeHtml(msg.sender) || 'Unknown'}:</span>
                     </div>
             `;
+
+            // Show reply preview if this is a reply
+            if (msg.isReply && msg.replyTo) {
+                messagesHtml += `
+                    <div class="reply-preview">
+                        <div class="reply-indicator">Replying to ${escapeHtml(msg.replyTo.sender) || 'someone'}:</div>
+                        <div class="reply-content">${escapeHtml(msg.replyTo.content) || (msg.replyTo.hasMedia ? '[Media]' : '[Message]')}</div>
+                    </div>
+                `;
+            }
 
             if (msg.content) {
                 messagesHtml += `<div class="message-text">${escapeHtml(msg.content)}</div>`;
@@ -1835,6 +1634,32 @@
             color: #999;
             font-style: italic;
         }
+        .reply-preview {
+            background: #f0f4f8;
+            border-left: 3px solid #0088cc;
+            padding: 8px 12px;
+            margin-bottom: 8px;
+            border-radius: 0 8px 8px 0;
+            font-size: 13px;
+        }
+        .reply-indicator {
+            color: #0088cc;
+            font-weight: 600;
+            font-size: 11px;
+            margin-bottom: 4px;
+        }
+        .reply-content {
+            color: #666;
+            font-style: italic;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 100%;
+        }
+        .message.outgoing .reply-preview {
+            background: #d4e8f8;
+            border-left-color: #0066aa;
+        }
         @media print {
             body { background: #fff; }
             .message { box-shadow: none; border: 1px solid #eee; }
@@ -1846,8 +1671,7 @@
         <h1>${escapeHtml(state.chatName)}</h1>
         <div class="meta">
             <div>Exported: ${new Date().toLocaleString()}</div>
-            <div>Date Range: ${state.dateRange.from} to ${state.dateRange.to}</div>
-            <div>Part 1 of 1 | Messages: ${state.messages.length}</div>
+            <div>Messages: ${state.messages.length}</div>
         </div>
     </div>
     <hr>
@@ -1858,7 +1682,7 @@
         updateProgress(95, 'Preparing download...');
 
         const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-        const filename = `${sanitizeFilename(state.chatName)}_${state.dateRange.from}_to_${state.dateRange.to}.html`;
+        const filename = `${sanitizeFilename(state.chatName)}_${state.exportDate}.html`;
         saveAs(blob, filename);
 
         updateProgress(100, 'Complete!');
